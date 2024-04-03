@@ -1,164 +1,236 @@
-import os
-import matplotlib.pyplot as plt
-from scapy.all import *
-import time
 import csv
-import numpy as np  # Import numpy for array manipulation
+from scapy.all import *
+from datetime import datetime
+import matplotlib.pyplot as plt
+import numpy as np
+from scipy.interpolate import interp1d
 
 
-def read_csv_to_dict(file_path):
-    data_dict = []
+import csv
+from scapy.all import rdpcap, IP
 
-    with open(file_path, 'r') as csv_file:
-        csv_reader = csv.DictReader(csv_file)
-        for row in csv_reader:
-            data_dict.append({
-                "time": row["time"],
-                "sent": int(row["sent"]),
-                "received": int(row["received"])
-            })
+def extract_data_from_time_to_file(pcap_data_list):
+    csv_files = []
+    for idx, data_item in enumerate(pcap_data_list):
+        pcap_file, domain_to_ips, my_ip = data_item
+        print("Pre-extraction for file", pcap_file)
+        base_filename = os.path.basename(pcap_file)
 
-    return data_dict
+        output_file = f"data_extracted_output_{base_filename}.csv"
+        csv_files.append(output_file)  # Append the filename to the list
 
-def extract_data_from_time(pcap_file, domain_to_ips, my_ip):
-    print("pre extraction")
-    data = {"time": [], "sent": {domain: [] for domain in domain_to_ips}, "received": {domain: [] for domain in domain_to_ips}}
-    start_time = 0
-    last_packet_time = 0
-    first_packet_time = 0
-    cnt = 10
+        data = {"time": [], "sent": {domain: [] for domain in domain_to_ips}, "received": {domain: [] for domain in domain_to_ips}}
+        first_packet_time = 0
 
-
-    for packet in rdpcap(pcap_file):
-        print(f"packet loop{cnt}") 
-        cnt +=1
-        if IP in packet:
-            if first_packet_time == 0:
+        # Find the first packet's timestamp
+        for packet in rdpcap(pcap_file):
+            if IP in packet:
                 first_packet_time = float(packet.time) * 1000
-            last_packet_time = float(packet.time) * 1000
-    
-    for packet in rdpcap(pcap_file):
-        if IP in packet:
-            timestamp = float(packet.time) * 1000
-            curr_time = timestamp - first_packet_time
-            data["time"].append(curr_time)
+                break
 
-            for domain, target_ips in domain_to_ips.items():
-                print(f"domain loop{cnt}")
-                cnt +=1
-                sent_len = sum(packet[IP].len for ip in target_ips if packet[IP].src == my_ip and packet[IP].dst == ip)
-                received_len = sum(packet[IP].len for ip in target_ips if packet[IP].src == ip and packet[IP].dst == my_ip)
-                data["sent"][domain].append(sent_len)
-                data["received"][domain].append(received_len)
-    return data
+        with open(output_file, 'w', newline='') as f:
+            csv_writer = csv.writer(f)
+            csv_writer.writerow(["time", "domain", "sent", "received"])  # Write header line
+            cnt = 0
+            for packet in rdpcap(pcap_file):
+                print(cnt)
+                cnt += 1
+                if IP in packet:
+                    timestamp = float(packet.time) * 1000
+                    curr_time = timestamp - first_packet_time
+
+                    for domain, target_ips in domain_to_ips.items():
+                        sent_len = sum(packet[IP].len for ip in target_ips if packet[IP].src == my_ip and packet[IP].dst == ip)
+                        received_len = sum(packet[IP].len for ip in target_ips if packet[IP].src == ip and packet[IP].dst == my_ip)
+                        print(f"extracting domains...")
+                        cnt+=1
+                        data["sent"][domain].append(sent_len)
+                        print(f"send length = {sent_len}")
+                        data["received"][domain].append(received_len)
+                        
+                        csv_writer.writerow([curr_time, domain, sent_len, received_len])
+
+    return csv_files
 
 
+def plot_data_from_csv(csv_files):
+    all_data = {"time": [], "domain": [], "sent": []}
 
+    # Read data from all CSV files
+    for csv_file in csv_files:
+        with open(csv_file, 'r') as f:
+            csv_reader = csv.DictReader(f)
+            for row in csv_reader:
+                all_data["time"].append(float(row["time"]))
+                all_data["domain"].append(row["domain"])
+                all_data["sent"].append(int(row["sent"]))
 
-def plot_data(data, us_target_domains, uk_data, uk_domains, output_file, start_time, end_time):
+    # Plotting
+    all_data["time"] = [t / (1000 * 60 * 60) for t in all_data["time"]]  # Convert milliseconds to hours
+    #all_data["time"] = [t / (1000 * 60) for t in all_data["time"]]  # Convert milliseconds to minutes
+
     plt.figure(figsize=(10, 6))
+    for domain in set(all_data["domain"]):
+        domain_data = [all_data["sent"][i] for i in range(len(all_data["sent"])) if all_data["domain"][i] == domain]
+        time_data = [all_data["time"][i] for i in range(len(all_data["time"])) if all_data["domain"][i] == domain]
+        plt.plot(time_data, domain_data,color='blue', label=domain)
 
-    # Plot data for US domains
-    for target_domain in us_target_domains:
-        sent_data = data["sent"][target_domain]
-        time_data = np.array(data["time"])  # Convert to NumPy array
-        mask = (time_data >= start_time) & (time_data <= end_time)
-        filtered_time_data = time_data[mask]
-        plt.plot(filtered_time_data, np.array(sent_data)[mask], label=f"Sent to {target_domain}")
-
-    # Plot data for UK domains
-    for target_domain in uk_domains:
-        sent_data = uk_data["sent"][target_domain]
-        time_data = np.array(uk_data["time"])  # Convert to NumPy array
-        mask = (time_data >= start_time) & (time_data <= end_time)
-        filtered_time_data = time_data[mask]
-        plt.plot(filtered_time_data, np.array(sent_data)[mask], label=f"Sent to {target_domain}")
-
-    plt.xlabel('Time (s)')
-    plt.ylabel('Bytes')
-    plt.title(f'Bytes sent Over Time ({start_time}-{end_time} ms)')
+    plt.xlabel("Time (minutes)")
+    plt.ylabel("Data Sent (bytes)")
+    plt.title("Data Sent over Time")
     plt.legend()
-    plt.savefig(output_file)
-    plt.close()  # Close the figure to prevent displaying it
+    plt.grid(True)
+    #plt.xlim(0,20)
+    plt.savefig('data_over_time_plot{}.png'.format(domain))
+
+    plt.show()
 
 
 
-def generate_pairs(interval_size, max_interval):
-    intervals = []
-    for start_time in range(0, max_interval, interval_size):
-        end_time = start_time + interval_size
-        if end_time <= max_interval:
-            intervals.append((start_time, end_time))
-    return intervals
+
+def plot_fourier_transformation(csv_files):
+    # Create a single figure for all plots
+    plt.figure(figsize=(10, 6))
+    legend_labels = []  # List to store labels for legend
+
+    for csv_file in csv_files:
+        # Read data from the CSV file
+        time_data = []
+        sent_data = []
+        domain = ""
+        with open(csv_file, 'r') as f:
+            csv_reader = csv.DictReader(f)
+            next(csv_reader)  # Skip header row
+            for row in csv_reader:
+                time_data.append(float(row["time"])/1000)  # Time data
+                sent_data.append(int(row["sent"]))  # Sent data
+                domain = row["domain"]  # Get the domain from the current CSV file
+
+        # Perform Fourier transformation
+        time_diff = np.diff(time_data)
+        sampling_rate = 1 / np.mean(time_diff)
 
 
 
+        
+        #sampling_rate = 1 / time_data[2] - time_data[0]
+        #sampling_rate = 1 / time_diff[0]
+
+        fourier_transform = np.fft.fft(sent_data)
+        frequencies = np.fft.fftfreq(len(sent_data), d=1/sampling_rate)
+
+        # Plot the Fourier transformation with label
+        plt.plot(frequencies, np.abs(fourier_transform),color ='orange', label=domain, alpha=0.7)
+        legend_labels.append(domain)  # Append label to the list
+
+        # Save plot to a separate file for each CSV file
+        plt.xlabel('Frequency (Hz)')
+        plt.ylabel('Amplitude')
+        plt.title('Log Scaled Fourier Transformation ({})'.format(domain))
+        plt.grid(True)
+        #plt.yscale('log')  # Set y-axis to logarithmic scale
+        #plt.xscale('log')  # Set y-axis to logarithmic scale
+        plt.legend([domain])  # Add legend for individual plot
+        plt.savefig('fourier_transform_log{}.png'.format(domain))
+        plt.show()
+        plt.close()  # Close the individual plot after saving
+
+    # Plot all Fourier transformations together with legend
+    for csv_file in csv_files:
+        # Read data from the CSV file
+        time_data = []
+        sent_data = []
+        domain = ""
+        with open(csv_file, 'r') as f:
+            csv_reader = csv.DictReader(f)
+            next(csv_reader)  # Skip header row
+            for row in csv_reader:
+                time_data.append(float(row["time"])/1000)  # Time data
+                sent_data.append(int(row["sent"]))  # Sent data
+                domain = row["domain"]  # Get the domain from the current CSV file
+
+        # Perform Fourier transformation
+        interpolated_time = np.linspace(time_data[0], time_data[-1], len(time_data))
+        interpolator = interp1d(time_data, sent_data, kind='linear')
+        interpolated_sent_data = interpolator(interpolated_time)
+        time_diff = np.diff(interpolated_time)
+        
+
+
+        fourier_transform = np.fft.fft(sent_data)
+
+        sampling_rate = 1 / time_diff[0]#hz
+        frequencies = np.fft.fftfreq(len(sent_data), d=1/sampling_rate) #hz
+
+        #sampling_rate_seconds = np.mean(time_diff) #seconds
+        #frequencies = np.fft.fftfreq(len(sent_data), d=sampling_rate_seconds) #seconds
+
+
+        # Plot the Fourier transformation with label
+        plt.plot(frequencies, np.abs(fourier_transform), label=domain, alpha=0.7)
+
+    # Add labels and legend
+    plt.xlabel('Frequency (Hz)')
+    plt.ylabel('Amplitude')
+    plt.title('Combined Fourier Transformations')
+    plt.grid(True)
+    plt.legend()
+    plt.yscale('log')  # Set y-axis to logarithmic scale
+    plt.xscale('log')  # Set y-axis to logarithmic scale
+
+    #plt.xlim(0.01,1)
+    plt.savefig('combined_fourier_transform_log_hz.png')
+
+
+def main():
+    #change pcap file with filtered files, for us and uk and change target ips
+    pcap_file = "C:/Users/alexa/Desktop/uc davis/uc davis 2024 winter/Research/Round 0 Antenna/Shopping_Samsung_Treatment_Training_Round_0_Filtered.pcap"
+    #us_pcap_file = "D:/PCAPFILES/round 3 filtered files/LG/mergedLGPCAP.pcap"
+    us_ip = "10.42.0.233"
+    uk_ip = "18.10.0.3"
+
+    target_ips = {
+        'tkacr316.alphonso.tv': ['173.233.81.210'],
+        'tkacr387.alphonso.tv': ['173.233.81.137']
+    }
+
+
+    pcap_data_list = [ (pcap_file, {'acr-us-prd.samsungcloud.tv': ['3.215.97.98', '52.202.138.71', '44.193.102.55', '18.210.58.100', '34.225.140.68', '107.20.145.250', '52.203.43.0', '52.70.49.86'],
+'log-config.samsungacr.com': ['54.166.92.231', '52.72.14.201', '54.205.156.7'],
+'log-ingestion.samsungacr.com': ['52.206.204.196', '52.23.118.114', '52.71.137.170', '52.6.113.198', '52.5.158.124', '52.2.74.163', '52.72.98.143', '52.4.67.49', '52.2.19.187', '52.71.215.19', '52.23.57.181', '52.55.142.213', '52.55.177.209', '52.71.99.64', '52.4.184.240', '52.55.21.118', '52.23.118.114', '52.6.113.198', '52.45.128.50', '52.4.67.49', '52.20.172.27', '52.5.51.239', '52.206.204.196', '52.72.163.41', '52.23.118.114', '52.72.98.143', '52.71.137.170', '52.72.163.41', '52.4.46.134', '52.4.67.49', '52.6.113.198', '52.5.158.124', '52.23.57.181', '52.45.25.69', '52.6.187.188', '52.73.237.84', '52.4.184.240', '52.55.142.213', '52.2.88.75', '52.71.99.64', '52.23.57.181', '52.55.21.118', '52.55.142.213', '52.4.184.240', '52.6.187.188', '52.45.25.69', '52.72.171.106', '52.71.215.19', '52.23.57.181', '52.6.187.188', '52.71.99.64', '52.45.0.238', '52.55.142.213', '52.71.215.19', '52.21.100.92', '52.45.25.69', '52.2.88.75', '52.4.184.240', '52.71.215.19', '52.2.19.187', '52.23.57.181', '52.55.142.213', '52.72.171.106', '52.73.237.84', '52.2.88.75', '52.55.177.209', '52.73.237.84', '52.23.57.181', '52.6.187.188', '52.71.99.64', '52.45.25.69', '52.71.215.19', '52.4.46.134', '52.72.30.23', '52.7.103.224', '52.71.137.170', '52.20.172.27', '52.5.158.124', '52.5.51.239', '52.206.204.196', '52.4.46.134', '52.72.98.143', '52.7.103.224', '52.4.67.49', '52.6.113.198', '52.20.172.27', '52.72.163.41', '52.72.30.23', '52.45.128.50', '52.7.103.224', '52.207.180.16', '52.6.113.198', '52.5.158.124', '52.71.137.170', '52.4.67.49', '52.4.46.134', '52.45.128.50', '52.72.98.143', '52.71.137.170', '52.207.180.16', '52.4.67.49', '52.206.204.196', '52.6.113.198', '52.72.30.23', '52.45.128.50', '52.72.98.143', '52.71.137.170', '52.72.163.41', '52.6.113.198', '52.5.158.124', '52.206.204.196', '52.2.74.163', '52.45.25.69', '52.2.19.187', '52.55.21.118', '52.6.187.188', '52.4.184.240', '52.55.177.209', '52.71.99.64', '52.73.237.84', '52.45.25.69', '52.23.57.181', '52.55.21.118', '52.55.177.209', '52.71.215.19', '52.6.187.188', '52.4.184.240', '52.73.237.84', '52.45.25.69', '54.144.72.99', '52.4.184.240', '52.45.0.238', '52.2.19.187', '52.55.21.118', '52.73.237.84', '52.71.99.64', '52.4.67.49', '52.23.118.114', '52.7.103.224', '52.6.113.198', '52.20.172.27', '52.5.158.124', '52.5.51.239', '52.4.46.134', '52.4.67.49', '52.5.51.239', '52.5.158.124', '52.4.46.134', '52.2.74.163', '52.23.118.114', '52.6.113.198', '52.72.98.143', '52.4.67.49', '52.7.103.224', '52.23.118.114', '52.2.74.163', '52.6.113.198', '52.5.51.239', '52.20.172.27', '52.71.137.170', '52.5.158.124', '52.23.118.114', '52.20.172.27', '52.4.67.49', '52.72.98.143', '52.6.113.198', '52.206.204.196', '52.7.103.224', '52.5.51.239', '52.20.172.27', '52.71.137.170', '52.72.98.143', '52.5.158.124', '52.72.30.23', '52.72.163.41', '52.4.46.134', '52.55.142.213', '52.2.88.75', '54.144.72.99', '52.6.187.188', '52.23.57.181', '52.4.184.240', '52.55.177.209', '52.73.237.84', '52.55.177.209', '52.72.171.106', '52.4.184.240', '52.55.142.213', '54.144.72.99', '52.71.215.19', '52.6.187.188', '52.2.19.187', '52.6.113.198', '52.72.30.23', '52.4.46.134', '52.20.172.27', '52.72.163.41', '52.71.137.170', '52.45.128.50', '52.5.158.124', '52.6.113.198', '52.72.98.143', '52.72.30.23', '52.45.128.50', '52.71.137.170', '52.5.51.239', '52.7.103.224', '52.4.46.134', '52.6.187.188', '52.71.215.19', '52.2.88.75', '52.2.19.187', '52.73.237.84', '52.55.142.213', '54.144.72.99', '52.72.171.106', '52.70.64.7', '54.174.203.255', '52.87.62.26', '54.157.143.177', '54.156.15.89', '54.152.90.219', '54.161.201.242', '54.160.105.99', '52.7.103.224', '52.72.163.41', '52.206.204.196', '52.4.46.134', '52.5.158.124', '52.4.67.49', '52.45.128.50', '52.72.98.143', '52.71.215.19', '52.55.21.118', '52.4.184.240', '52.71.99.64', '52.45.0.238', '52.72.171.106', '52.73.237.84', '54.144.72.99', '52.72.163.41', '52.206.204.196', '52.20.172.27', '52.23.118.114', '52.6.113.198', '52.4.67.49', '52.5.51.239', '52.2.74.163', '52.72.171.106', '52.23.57.181', '52.73.237.84', '54.144.72.99', '52.71.215.19', '52.55.21.118', '52.4.184.240', '52.2.88.75', '52.72.171.106', '52.55.177.209', '52.21.100.92', '52.2.88.75', '52.23.57.181', '52.6.187.188', '52.45.0.238', '54.144.72.99', '52.72.171.106', '54.144.72.99', '52.55.177.209', '52.55.21.118', '52.4.184.240', '52.2.88.75', '52.2.19.187', '52.45.25.69', '52.73.168.171', '54.164.195.241', '54.204.119.19', '54.174.204.193', '54.147.106.186', '54.145.74.158', '54.145.74.225', '54.164.202.57', '52.73.168.171', '54.164.202.57', '54.144.183.24', '54.174.204.193', '54.145.75.32', '54.204.119.19', '54.145.74.158', '54.147.106.186', '52.73.237.84', '52.4.184.240', '52.71.215.19', '52.45.0.238', '52.2.88.75', '52.6.187.188', '52.55.142.213', '52.23.57.181', '52.86.143.205', '54.164.195.241', '54.145.75.32', '54.156.32.166', '52.73.168.171', '54.167.219.29', '54.144.183.24', '54.174.204.193', '52.86.231.136', '54.164.202.57', '54.164.195.241', '54.145.74.158', '54.144.183.24', '54.174.204.193', '52.86.143.205', '54.156.32.166', '54.144.7.120', '52.73.9.4', '54.161.201.242', '52.45.174.164', '54.152.90.219', '52.87.62.26', '54.146.140.49', '54.160.105.99', '54.144.72.99', '52.45.0.238', '52.6.187.188', '52.71.215.19', '52.73.237.84', '52.55.21.118', '52.71.99.64', '52.2.88.75', '54.144.72.99', '52.72.171.106', '52.4.184.240', '52.45.25.69', '52.45.0.238', '52.71.99.64', '52.73.237.84', '52.55.21.118', '54.145.74.158', '52.86.143.205', '54.145.75.32', '54.174.204.193', '54.156.32.166', '52.86.231.136', '54.204.119.19', '54.147.106.186', '54.145.74.158', '54.204.119.19', '52.86.143.205', '54.145.75.32', '54.145.74.225', '54.174.204.193', '54.156.32.166', '52.73.168.171', '54.145.75.32', '52.86.231.136', '54.144.183.24', '52.73.168.171', '54.167.219.29', '54.164.195.241', '54.145.74.225', '54.159.243.61', '54.145.75.32', '54.164.195.241', '54.159.243.61', '54.167.219.29', '54.204.119.19', '54.145.74.225', '52.73.168.171', '54.174.204.193', '54.146.140.49', '54.144.7.120', '54.152.90.219', '52.45.174.164', '54.161.201.242', '52.87.62.26', '52.72.95.206', '54.156.207.210', '54.146.140.49', '54.152.90.219', '54.174.203.255', '54.157.143.177', '52.45.174.164', '52.73.9.4', '54.160.105.99', '54.144.7.120', '54.147.106.186', '52.73.168.171', '54.156.32.166', '54.164.195.241', '54.144.183.24', '54.167.219.29', '54.159.243.61', '54.145.74.225', '54.147.106.186', '52.86.231.136', '54.144.183.24', '54.164.202.57', '54.164.195.241', '54.174.204.193', '54.167.219.29', '52.73.168.171', '54.147.106.186', '54.145.74.158', '52.73.168.171', '54.167.219.29', '52.86.231.136', '54.204.119.19', '54.145.74.225', '54.164.202.57', '54.152.90.219', '52.73.9.4', '52.87.62.26', '54.146.140.49', '54.161.201.242', '52.45.174.164', '54.145.31.147', '54.174.203.255', '54.152.90.219', '52.87.33.33', '54.174.203.255', '54.157.143.177', '54.145.181.226', '54.144.7.120', '54.146.140.49', '54.160.105.99', '54.156.15.89', '54.160.105.99', '54.144.7.120', '52.87.62.26', '54.145.181.226', '52.72.95.206', '54.152.90.219', '54.156.207.210', '54.156.207.210', '54.160.105.99', '52.87.33.33', '52.73.9.4', '54.174.203.255', '54.156.15.89', '54.144.7.120', '52.45.174.164', '54.156.32.166', '54.145.74.225', '54.145.75.32', '54.164.195.241', '54.164.202.57', '54.167.219.29', '54.159.243.61', '52.86.231.136', '54.157.143.177', '54.160.105.99', '52.87.33.33', '54.161.201.242', '54.156.15.89', '54.174.203.255', '54.144.7.120', '54.145.31.147', '54.159.243.61', '52.86.143.205', '54.145.75.32', '54.147.106.186', '52.86.231.136', '54.174.204.193', '54.164.195.241', '52.73.168.171', '54.159.243.61', '54.144.183.24', '54.147.106.186', '54.145.74.225', '54.156.32.166', '54.164.195.241', '54.164.202.57', '54.204.119.19', '54.160.105.99', '52.72.95.206', '52.45.174.164', '54.174.203.255', '54.156.15.89', '54.144.7.120', '54.145.31.147', '54.146.140.49', '54.160.105.99', '54.144.7.120', '52.72.95.206', '52.45.174.164', '54.146.140.49', '54.152.90.219', '54.157.143.177', '54.161.201.242', '54.160.72.32', '54.205.55.175', '54.172.153.124', '54.198.179.183', '54.175.37.209', '54.204.171.204', '54.173.231.114', '54.209.143.171', '54.162.238.206', '54.175.136.147', '54.236.175.180', '54.208.186.132', '54.172.59.90', '54.209.229.228', '54.175.237.143', '54.197.142.224', '54.162.238.206', '54.175.237.143', '54.208.242.132', '54.159.199.115', '54.172.59.90', '54.174.186.25', '54.236.175.180', '54.175.136.147', '54.162.238.206', '54.197.253.135', '54.175.51.98', '54.208.242.132', '54.175.237.143', '54.197.142.224', '54.210.101.62', '54.208.186.132', '54.164.195.241', '52.73.168.171', '54.145.75.32', '52.86.143.205', '54.204.119.19', '54.174.204.193', '54.147.106.186', '54.167.219.29', '54.164.195.241', '52.73.168.171', '54.167.219.29', '54.164.202.57', '54.145.74.225', '52.86.231.136', '54.147.106.186', '54.145.74.158', '54.165.6.159', '54.208.186.132', '54.175.136.147', '54.174.186.25', '54.162.238.206', '54.210.101.62', '54.159.199.115', '54.236.175.180', '54.165.6.159', '54.208.242.132', '54.210.101.62', '54.209.229.228', '54.174.186.25', '54.175.136.147', '54.172.59.90', '54.162.238.206', '54.172.153.124', '54.173.231.114', '54.175.195.105', '54.167.224.193', '54.211.215.246', '54.225.115.56', '54.205.55.175', '54.221.205.58', '54.172.153.124', '54.209.143.171', '54.205.55.175', '54.175.195.105', '54.167.189.209', '54.173.231.114', '54.208.228.207', '54.205.33.226', '54.174.186.25', '54.197.253.135', '54.172.59.90', '54.175.136.147', '54.209.229.228', '54.204.122.240', '54.208.186.132', '54.175.51.98', '54.174.203.255', '54.156.207.210', '52.87.33.33', '52.73.9.4', '54.157.143.177', '54.152.90.219', '54.145.31.147', '54.160.105.99', '54.175.136.147', '54.175.51.98', '54.162.238.206', '54.208.242.132', '54.210.101.62', '54.209.174.217', '54.172.59.90', '54.174.186.25', '54.175.195.105', '54.208.228.207', '54.175.37.209', '54.221.205.58', '54.160.72.32', '54.173.231.114', '54.204.171.204', '54.172.153.124', '54.175.195.105', '54.225.115.56', '54.208.228.207', '54.211.215.246', '54.160.72.32', '54.167.224.193', '54.173.231.114', '54.221.205.58', '54.175.237.143', '54.172.59.90', '54.174.186.25', '54.162.238.206', '54.209.229.228', '54.159.199.115', '54.208.242.132', '54.165.6.159', '54.175.51.98', '54.175.237.143', '54.208.186.132', '54.172.59.90', '54.165.6.159', '54.236.175.180', '54.208.242.132', '54.197.253.135', '54.175.51.98', '54.208.186.132', '54.159.199.115', '54.174.186.25', '54.175.237.143', '54.162.238.206', '54.204.122.240', '54.172.59.90', '54.175.51.98', '54.236.175.180', '54.165.6.159', '54.175.237.143', '54.208.186.132', '54.208.242.132', '54.159.199.115', '54.209.229.228', '54.197.253.135', '54.208.242.132', '54.165.6.159', '54.172.59.90', '54.210.101.62', '54.204.122.240', '54.236.175.180', '54.175.237.143', '54.198.179.183', '54.167.189.209', '54.173.231.114', '54.204.171.204', '54.205.33.226', '54.225.115.56', '54.175.37.209', '54.208.228.207', '54.204.119.19', '54.164.202.57', '54.156.32.166', '54.167.219.29', '54.164.195.241', '54.145.74.158', '54.145.74.225', '52.86.231.136', '54.205.33.226', '54.205.55.175', '54.211.215.246', '54.175.195.105', '54.173.231.114', '54.160.72.32', '54.167.189.209', '54.175.37.209', '54.205.33.226', '54.225.115.56', '54.221.205.58', '54.205.55.175', '54.175.37.209', '54.173.231.114', '54.209.143.171', '54.208.228.207', '54.205.55.175', '54.173.231.114', '54.225.115.56', '54.175.37.209', '54.172.153.124', '54.175.195.105', '54.167.224.193', '54.198.179.183', '54.205.55.175', '54.225.115.56', '54.175.37.209', '54.167.189.209', '54.204.171.204', '54.205.33.226', '54.209.143.171', '54.211.215.246', '54.208.186.132', '54.209.229.228', '54.172.59.90', '54.165.6.159', '54.175.237.143', '54.175.51.98', '54.174.186.25', '54.208.242.132', '54.208.228.207', '54.167.189.209', '54.167.224.193', '54.211.215.246', '54.225.115.56', '54.175.195.105', '54.173.231.114', '54.205.55.175', '54.208.228.207', '54.167.189.209', '54.209.143.171', '54.167.224.193', '54.211.215.246', '54.173.231.114', '54.175.37.209', '54.205.33.226', '54.209.174.217', '54.208.242.132', '54.236.175.180', '54.159.199.115', '54.175.237.143', '54.208.186.132', '54.204.122.240', '54.174.186.25', '54.209.229.228', '54.197.142.224', '54.236.175.180', '54.174.186.25', '54.204.122.240', '54.162.238.206', '54.165.6.159', '54.208.186.132', '54.209.229.228', '54.204.122.240', '54.175.237.143', '54.175.51.98', '54.174.186.25', '54.236.175.180', '54.172.59.90', '54.208.242.132', '54.210.101.62', '54.236.175.180', '54.209.229.228', '54.197.253.135', '54.165.6.159', '54.208.186.132', '54.159.199.115', '54.208.242.132', '54.211.215.246', '54.209.143.171', '54.167.189.209', '54.205.33.226', '54.208.228.207', '54.198.179.183', '54.204.171.204', '54.167.224.193', '54.221.205.58', '54.198.179.183', '54.209.143.171', '54.204.171.204', '54.160.72.32', '54.208.228.207', '54.211.215.246', '54.172.153.124', '54.225.115.56', '54.209.143.171', '54.221.205.58', '54.175.37.209', '54.208.228.207', '54.204.171.204', '54.173.231.114', '54.167.224.193'],
+},"10.42.0.233")]
+
+
+    # pcap_data_list = [ (pcap_file, {'acr-us-prd.samsungcloud.tv': ['3.215.97.98', '52.202.138.71', '44.193.102.55', '18.210.58.100', '34.225.140.68', '107.20.145.250', '52.203.43.0', '52.70.49.86']
+    #     },"10.42.0.233")]
+
+
+#for eu vs na comparison, 
+    # pcap_data_list = [
+    # (uk_pcap_file, {
+    #     'uk_tkacr': 
+    #     ['96.47.5.159']
+    # }, "18.10.0.3"),
+    #  (us_pcap_file, {
+    #      'tkacr388.alphonso.tv': ['173.233.81.210'],
+    #      'tkacr389.alphonso.tv': ['173.233.81.137']
+    #  }, "10.42.0.96")
+    # ] 
+
+
+
+
+    # #when your data set changes you must run this. 
+    # data_over_time_plot = extract_data_from_time_to_file(pcap_data_list) #creates the csv files, 
+    # plot_data_from_csv(data_over_time_plot)
+    # plot_fourier_transformation(data_over_time_plot)
+
+    
+    #csv_files = ["data_extracted_output_1.csv", "data_extracted_output_0.csv"] #when comparing two datasets 
+    csv_files =  ["data_extracted_output_Shopping_Samsung_Treatment_Training_Round_0_Filtered.csv"]
+    plot_data_from_csv(csv_files)
+    plot_fourier_transformation(csv_files)
 
 
 if __name__ == "__main__":
-    pcap_file = "D:/PCAPFILES/round 3 filtered files/LG/mergedLGPCAP.pcap"
-    uk_pcap_file = "D:/PCAPFILES/round 3 filtered files/LG/UK_acr_domains_scenario2_applicationdata_round3.pcap"
-    
-    target_ips = {
-        'tkacr316.alphonso.tv': [
-            '173.233.81.210'
-        ],
-        'tkacr387.alphonso.tv': [
-            '173.233.81.137'
-        ]
-    }
-
-    uk_target_ips = {
-        'uk_tkacr': 
-        ['96.47.5.159']
-    }
-
-    my_ip = "10.42.0.96"
-    uk_ip = "18.10.0.3"
-    output_dir = "D:/PCAPFILES/round 3 filtered files/LG/Plots/"
-
-    max_value = 110000000
-    interval_size = 15000
-    interval_size_2 = 10000
-
-    max_interval = 110000000
-
-    time_intervals_1 = generate_pairs(interval_size, max_interval)
-    time_intervals_2 = generate_pairs(interval_size_2, max_interval)
-    #print(time_intervals_1)
-
-    
-    #print (uk_data["time"])
-    # plt.figure(figsize=(10, 6))
-    # start_time,end_time = time_intervals_1[0]
-    # print(start_time)
-    # print(end_time)
-
-    # # for target_domain in uk_target_ips:
-    # #     sent_data = uk_data["sent"][target_domain]
-    # #     time_data = np.array(uk_data["time"])  # Convert to NumPy array
-    # #     mask = (time_data >= start_time) & (time_data <= end_time)
-    # #     filtered_time_data = time_data[mask]
-    # #     plt.plot(filtered_time_data, np.array(sent_data)[mask], label=f"Sent to {target_domain}")
-    # #     plt.xlabel('Time (s)')
-    # #     plt.ylabel('Bytes')
-    # #     plt.title(f'Bytes sent Over Time ({start_time}-{end_time} ms)')
-    # #     plt.legend()
-    # #     plt.show()
-   
-    uk_data = extract_data_from_time(uk_pcap_file, uk_target_ips, uk_ip)
-    us_data = extract_data_from_time(pcap_file, target_ips, my_ip)
-
-    for start_time, end_time in time_intervals_1:
-        output_file = f"Round_3_LG_ACR_domains_bytes_over_time_fr_{start_time}_{end_time}.png"
-        output_path = os.path.join(output_dir, output_file)
-        print("before plot 1")
-        plot_data(us_data, target_ips, uk_data, uk_target_ips, output_path,start_time,end_time)
-        print("saved plto 1")
-
-
-    for start_time, end_time in time_intervals_2:
-        output_file = f"Round_3_LG_ACR_domains_bytes_over_time_fr_{start_time}_{end_time}.png"
-        output_path = os.path.join(output_dir, output_file)
-        plot_data(us_data, target_ips, uk_data, uk_target_ips, output_path,start_time,end_time)
-
+    main()
